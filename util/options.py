@@ -33,7 +33,7 @@ def args_parser():
     parser.add_argument('--spectral_gate', action='store_true',
                         help="Enable FedSpectralGate (default: OFF)")
 
-    parser.add_argument('--ratio', type=float, default=0.2,
+    parser.add_argument('--ratio', type=float, default=0.8,
                         help="Top-k frequency ratio to KEEP (e.g., 0.2 = keep top 20%)")
 
     parser.add_argument('--low_cut', type=float, default=0.2,
