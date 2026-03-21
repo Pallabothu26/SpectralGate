@@ -1,29 +1,48 @@
 import copy
 import torch
 
-def FedAvg_noniid(w, dict_len):
+
+def FedAvg_noniid(global_weights, deltas, dict_len):
     """
-    Standard Weighted Federated Averaging.
-    In FedSpectralGate, the 'w' list already contains the 
-    spectrally-filtered weights from each client.
-    """
-    # Create a deep copy of the first client's weights as the base for averaging
-    w_avg = copy.deepcopy(w[0])
+    FedSpectralGate Aggregation:
     
-    # Calculate the total number of samples across all participating clients
+    Instead of averaging model weights, we:
+    1. Average client DELTAS (updates)
+    2. Add averaged delta to global model
+    
+    Args:
+        global_weights: current global model (state_dict)
+        deltas: list of client updates (delta dictionaries)
+        dict_len: number of samples per client (for weighting)
+    
+    Returns:
+        updated global model weights
+    """
+
+    # Deep copy global weights (we will update this)
+    w_global = copy.deepcopy(global_weights)
+
+    # Total samples across clients
     total_samples = sum(dict_len)
-    
-    # Iterate through each layer/parameter in the model
-    for k in w_avg.keys():
-        # Multiply the first client's parameter by its weight (sample count)
-        w_avg[k] = w_avg[k] * dict_len[0]
-        
-        # Add the weighted parameters from the remaining clients
-        for i in range(1, len(w)):
-            w_avg[k] += w[i][k] * dict_len[i]
-            
-        # Divide by total samples to get the weighted average
-        # This results in the new Global Model weights
-        w_avg[k] = torch.div(w_avg[k], total_samples)
-        
-    return w_avg
+
+    # Initialize average delta
+    avg_delta = {}
+
+    # Iterate through each layer
+    for k in w_global.keys():
+
+        # Start with zero tensor of same shape
+        avg_delta[k] = torch.zeros_like(w_global[k])
+
+        # Weighted sum of deltas
+        for i in range(len(deltas)):
+            avg_delta[k] += deltas[i][k] * dict_len[i]
+
+        # Normalize by total samples
+        avg_delta[k] = avg_delta[k] / total_samples
+
+    #  Apply update: global = global + avg_delta
+    for k in w_global.keys():
+        w_global[k] += avg_delta[k]
+
+    return w_global

@@ -23,22 +23,21 @@ if __name__ == '__main__':
     torch.backends.cudnn.deterministic = True
 
     # 2. Prepare Data and Model
-    # This uses our updated dataset logic for CIFAR-10/100
     dataset_train, dataset_test, dict_users = get_dataset(args)
     netglob = build_model(args)
     netglob.to(args.device)
-    
+
     # 3. Logging Setup
     if not os.path.exists("./results/"):
         os.makedirs("./results/")
-    
+
     log_name = f"./results/{args.dataset}_{args.model}_ratio{args.ratio}_alpha{args.alpha_dirichlet}_gate{args.spectral_gate}.txt"
     f_acc = open(log_name, 'a')
     f_acc.write(f"Starting FedSpectralGate: Ratio={args.ratio}, Gate={args.spectral_gate}\n")
 
     # 4. Federated Training Loop
     m = max(int(args.frac * args.num_users), 1)
-    
+
     print(f"--- Starting Training on {args.dataset} with {args.model} ---")
     if args.spectral_gate:
         print(f"--- FedSpectralGate ACTIVE (Ratio: {args.ratio}) ---")
@@ -46,34 +45,39 @@ if __name__ == '__main__':
         print("--- Baseline FedAvg (Spectral Gate OFF) ---")
 
     for rnd in range(args.rounds):
-        w_locals, loss_locals = [], []
+        deltas, loss_locals = [], []   # 🔥 changed name
+
         idxs_users = np.random.choice(range(args.num_users), m, replace=False)
-        
+
         for idx in idxs_users:
-            # Create a local trainer for this client
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
-            
-            # Local training + Spectral Gating (inside update_weights)
-            # We pass a clean copy of the global model to the client
-            w_local, loss_local = local.update_weights(
-                net=copy.deepcopy(netglob).to(args.device), 
+
+            # Client returns DELTA now (not weights)
+            delta, loss_local = local.update_weights(
+                net=copy.deepcopy(netglob).to(args.device),
                 client_idx=idx
             )
-            
-            w_locals.append(copy.deepcopy(w_local))
+
+            deltas.append(copy.deepcopy(delta))   # 🔥 store deltas
             loss_locals.append(loss_local)
-        
-        # 5. Server-Side Aggregation
+
+        # 5. Server-Side Aggregation (UPDATED)
         dict_len = [len(dict_users[idx]) for idx in idxs_users]
-        w_glob = FedAvg_noniid(w_locals, dict_len)
-        
+
+        # 🔥 IMPORTANT CHANGE: pass global weights + deltas
+        w_glob = FedAvg_noniid(
+            netglob.state_dict(),   # current global model
+            deltas,                 # client updates
+            dict_len
+        )
+
         # Update Global Model
         netglob.load_state_dict(w_glob)
 
         # 6. Evaluation
         acc_test = globaltest(netglob, dataset_test, args)
         avg_loss = sum(loss_locals) / len(loss_locals)
-        
+
         print(f'Round {rnd:3d}, Avg Loss: {avg_loss:.3f}, Global Test Acc: {acc_test:.4f}')
         f_acc.write(f"Round {rnd}, Acc: {acc_test:.4f}, Loss: {avg_loss:.4f}\n")
         f_acc.flush()
