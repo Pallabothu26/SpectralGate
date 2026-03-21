@@ -6,19 +6,33 @@ import copy
 
 
 # =========================
-# Spectral Gate on DELTA
+# Low-Frequency Mask (NEW)
+# =========================
+def low_freq_mask(shape, ratio, device):
+    """
+    Creates a centered low-frequency mask for FFT tensors.
+    Works for N-D tensors.
+    """
+    mask = torch.zeros(shape, device=device)
+
+    center = [s // 2 for s in shape]
+    radius = [int(ratio * s / 2) for s in shape]
+
+    slices = tuple(
+        slice(c - r, c + r) for c, r in zip(center, radius)
+    )
+
+    mask[slices] = 1
+    return mask
+
+
+# =========================
+# Spectral Gate on DELTA (FIXED)
 # =========================
 def spectral_gate_delta(delta_dict, ratio, skip_bn=True):
     """
     Applies FedSpectralGate on model updates (delta).
-
-    Args:
-        delta_dict: dict of model updates (local - global)
-        ratio: fraction of frequencies to KEEP
-        skip_bn: whether to skip bias and BN layers
-
-    Returns:
-        filtered delta_dict
+    Uses true low-frequency masking instead of magnitude top-k.
     """
     filtered = {}
 
@@ -29,24 +43,27 @@ def spectral_gate_delta(delta_dict, ratio, skip_bn=True):
             filtered[name] = param
             continue
 
-        # FFT (frequency domain)
+        # FFT
         w_fft = torch.fft.fftn(param)
 
-        # Magnitude (energy)
-        mag = torch.abs(w_fft)
-        flat_mag = mag.view(-1)
+        # Shift to center low frequencies
+        w_fft_shifted = torch.fft.fftshift(w_fft)
 
-        # Top-k selection
-        k = max(1, int(flat_mag.numel() * ratio))
-        threshold = torch.topk(flat_mag, k).values[-1]
-
-        mask = mag >= threshold
+        # Create mask
+        mask = low_freq_mask(
+            w_fft_shifted.shape,
+            ratio,
+            device=w_fft_shifted.device
+        )
 
         # Apply mask
-        w_fft_filtered = w_fft * mask
+        w_fft_filtered = w_fft_shifted * mask
+
+        # Shift back
+        w_fft_unshifted = torch.fft.ifftshift(w_fft_filtered)
 
         # Inverse FFT
-        w_filtered = torch.fft.ifftn(w_fft_filtered).real
+        w_filtered = torch.fft.ifftn(w_fft_unshifted).real
 
         filtered[name] = w_filtered
 
@@ -54,11 +71,11 @@ def spectral_gate_delta(delta_dict, ratio, skip_bn=True):
 
 
 # =========================
-# Energy Logging (on DELTA)
+# Energy Logging (IMPROVED)
 # =========================
 def get_spectral_energy_delta(delta_dict, low_cut=0.2):
     """
-    Calculates low-frequency vs high-frequency energy for logging.
+    Calculates low vs high frequency energy using centered spectrum.
     """
     low_e_sum = 0
     high_e_sum = 0
@@ -68,17 +85,22 @@ def get_spectral_energy_delta(delta_dict, low_cut=0.2):
         if "weight" in name and "bn" not in name:
 
             w_fft = torch.fft.fftn(param)
-            mag = torch.abs(w_fft).view(-1)
+            w_fft_shifted = torch.fft.fftshift(w_fft)
 
-            sorted_mag, _ = torch.sort(mag, descending=True)
-            split_idx = int(len(sorted_mag) * low_cut)
+            mag = torch.abs(w_fft_shifted)
+            total_energy = torch.sum(mag ** 2)
 
-            low_e = torch.sum(sorted_mag[:split_idx])
-            high_e = torch.sum(sorted_mag[split_idx:])
-            total_e = low_e + high_e + 1e-8  # avoid divide by zero
+            mask = low_freq_mask(
+                mag.shape,
+                low_cut,
+                device=mag.device
+            )
 
-            low_e_sum += (low_e / total_e).item()
-            high_e_sum += (high_e / total_e).item()
+            low_energy = torch.sum((mag ** 2) * mask)
+            high_energy = total_energy - low_energy + 1e-8
+
+            low_e_sum += (low_energy / total_energy).item()
+            high_e_sum += (high_energy / total_energy).item()
             count += 1
 
     if count == 0:
@@ -120,7 +142,6 @@ class LocalUpdate(object):
         """
         Performs local training and returns DELTA instead of full model.
         """
-        # 🔴 Save global model BEFORE training
         global_model = copy.deepcopy(net)
 
         net.train()
@@ -133,22 +154,18 @@ class LocalUpdate(object):
         epoch_loss = []
 
         # =========================
-        # Local Training Loop
+        # Local Training
         # =========================
-        for iter in range(self.args.local_ep):
+        for _ in range(self.args.local_ep):
             batch_loss = []
 
-            for batch_idx, (images, labels) in enumerate(self.ldr_train):
+            for images, labels in self.ldr_train:
                 images = images.to(self.args.device)
                 labels = labels.to(self.args.device)
 
                 net.zero_grad()
-                log_probs = net(images)
-                loss = self.loss_func(log_probs, labels)
-
-                # Optional FedProx (not used now)
-                if self.args.beta > 0:
-                    pass
+                outputs = net(images)
+                loss = self.loss_func(outputs, labels)
 
                 loss.backward()
                 optimizer.step()
@@ -158,39 +175,41 @@ class LocalUpdate(object):
             epoch_loss.append(sum(batch_loss) / len(batch_loss))
 
         # =========================
-        # Compute DELTA (local - global)
+        # Compute DELTA
         # =========================
         local_weights = net.state_dict()
         global_weights = global_model.state_dict()
 
-        delta = {}
-        for key in local_weights.keys():
-            delta[key] = local_weights[key] - global_weights[key]
+        delta = {
+            key: local_weights[key] - global_weights[key]
+            for key in local_weights.keys()
+        }
 
         # =========================
-        # Log BEFORE spectral gating
+        # BEFORE Logging
         # =========================
         if self.args.spectral_gate:
-            low_pre, high_pre = get_spectral_energy_delta(delta, self.args.low_cut)
+            low_pre, high_pre = get_spectral_energy_delta(
+                delta, self.args.low_cut
+            )
             print(f"BEFORE [Client {client_idx}] lowE={low_pre:.3f}, highE={high_pre:.3f}")
 
         # =========================
-        # Apply FedSpectralGate
+        # Apply Spectral Gate
         # =========================
         if self.args.spectral_gate:
             delta = spectral_gate_delta(
                 delta,
                 ratio=self.args.ratio,
-                skip_bn=(self.args.skip_bn == 1)
+                skip_bn=self.args.skip_bn
             )
 
-            # Log AFTER gating
-            low_post, high_post = get_spectral_energy_delta(delta, self.args.low_cut)
+            # AFTER Logging
+            low_post, high_post = get_spectral_energy_delta(
+                delta, self.args.low_cut
+            )
             print(f"AFTER  [Client {client_idx}] lowE={low_post:.3f}, highE={high_post:.3f}")
 
-        # =========================
-        # Return DELTA (not model)
-        # =========================
         return delta, sum(epoch_loss) / len(epoch_loss)
 
 
