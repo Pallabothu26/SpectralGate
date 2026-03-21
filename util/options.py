@@ -1,3 +1,4 @@
+print("Using this file")
 import argparse
 
 def args_parser():
