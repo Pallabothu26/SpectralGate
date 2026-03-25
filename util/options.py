@@ -1,11 +1,12 @@
 print("Using this file")
 import argparse
+from email import parser
 
 def args_parser():
     parser = argparse.ArgumentParser()
     
     # ================= Federated Learning =================
-    parser.add_argument('--rounds', type=int, default=100,
+    parser.add_argument('--rounds', type=int, default=10,
                         help="Total global training rounds")
 
     parser.add_argument('--local_ep', type=int, default=5,
@@ -31,16 +32,16 @@ def args_parser():
 
     # ================= FedSpectralGate =================
     parser.add_argument('--spectral_gate', action='store_true',
-                        help="Enable FedSpectralGate (default: OFF)")
+                    help="Enable FedSpectralGate (default: OFF)")
 
     parser.add_argument('--ratio', type=float, default=0.8,
-                        help="Top-k frequency ratio to KEEP (e.g., 0.2 = keep top 20%)")
+                    help="Fraction of LOW-FREQUENCY region to keep (0.8 = keep 80% central spectrum)")
 
     parser.add_argument('--low_cut', type=float, default=0.2,
-                        help="Threshold to measure low-frequency energy")
+                    help="Threshold to measure low-frequency energy")
 
     parser.add_argument('--skip_bn', action='store_true',
-                        help="Skip BatchNorm and bias layers during spectral filtering")
+                    help="Skip BatchNorm and bias layers during spectral filtering")
 
     # ================= Model & Dataset =================
     parser.add_argument('--model', type=str, default='resnet18',

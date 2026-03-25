@@ -10,16 +10,18 @@ import copy
 # =========================
 def low_freq_mask(shape, ratio, device):
     """
-    Creates a centered low-frequency mask for FFT tensors.
-    Works for N-D tensors.
+    Softer low-frequency mask (keeps more useful signal)
     """
     mask = torch.zeros(shape, device=device)
 
     center = [s // 2 for s in shape]
-    radius = [int(ratio * s / 2) for s in shape]
+
+    # 🔥 KEY FIX: larger radius scaling
+    radius = [max(1, int(ratio * s)) for s in shape]
 
     slices = tuple(
-        slice(c - r, c + r) for c, r in zip(center, radius)
+        slice(max(0, c - r), min(s, c + r))
+        for c, r, s in zip(center, radius, shape)
     )
 
     mask[slices] = 1
