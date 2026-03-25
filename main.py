@@ -13,6 +13,7 @@ from model.build_model import build_model
 if __name__ == '__main__':
     # 1. Setup and Arguments
     args = args_parser()
+    print(f"DEBUG: spectral_gate={args.spectral_gate}, ratio={args.ratio}")
     args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Deterministic behavior for research reproducibility
