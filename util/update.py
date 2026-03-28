@@ -6,107 +6,81 @@ import copy
 
 
 # =========================
-# Low-Frequency Mask (NEW)
-# =========================
-def low_freq_mask(shape, ratio, device):
-    """
-    Softer low-frequency mask (keeps more useful signal)
-    """
-    mask = torch.zeros(shape, device=device)
-
-    center = [s // 2 for s in shape]
-
-    # 🔥 KEY FIX: larger radius scaling
-    radius = [max(1, int(ratio * s)) for s in shape]
-
-    slices = tuple(
-        slice(max(0, c - r), min(s, c + r))
-        for c, r, s in zip(center, radius, shape)
-    )
-
-    mask[slices] = 1
-    return mask
-
-
-# =========================
-# Spectral Gate on DELTA (FIXED)
+# Spectral Gate on DELTA (FIXED: top-k by magnitude)
 # =========================
 def spectral_gate_delta(delta_dict, ratio, skip_bn=True):
     """
-    Applies FedSpectralGate on model updates (delta).
-    Uses true low-frequency masking instead of magnitude top-k.
+    Applies FedSpectralGate on model update deltas.
+    Keeps the top `ratio` fraction of FFT coefficients by magnitude.
+    This correctly suppresses heterogeneity-driven high-frequency noise.
     """
     filtered = {}
 
     for name, param in delta_dict.items():
 
-        # Skip bias and BN layers
         if skip_bn and ("bias" in name or "bn" in name):
             filtered[name] = param
             continue
 
+        # Cast to float32 for FFT stability
+        p = param.float()
+
         # FFT
-        w_fft = torch.fft.fftn(param)
+        w_fft = torch.fft.fftn(p)
+        mag = torch.abs(w_fft)
 
-        # Shift to center low frequencies
-        w_fft_shifted = torch.fft.fftshift(w_fft)
+        # Keep top `ratio` fraction by energy magnitude
+        k = max(1, int(ratio * mag.numel()))
+        threshold = torch.topk(mag.flatten(), k).values.min()
+        mask = (mag >= threshold).float()
 
-        # Create mask
-        mask = low_freq_mask(
-            w_fft_shifted.shape,
-            ratio,
-            device=w_fft_shifted.device
-        )
+        # Apply mask and invert
+        w_filtered = torch.fft.ifftn(w_fft * mask).real
 
-        # Apply mask
-        w_fft_filtered = w_fft_shifted * mask
-
-        # Shift back
-        w_fft_unshifted = torch.fft.ifftshift(w_fft_filtered)
-
-        # Inverse FFT
-        w_filtered = torch.fft.ifftn(w_fft_unshifted).real
-
-        filtered[name] = w_filtered
+        # Cast back to original dtype (e.g. float32 or bfloat16)
+        filtered[name] = w_filtered.to(param.dtype)
 
     return filtered
 
 
 # =========================
-# Energy Logging (IMPROVED)
+# Energy Logging (FIXED: same top-k logic as gate)
 # =========================
-def get_spectral_energy_delta(delta_dict, low_cut=0.2):
+def get_spectral_energy_delta(delta_dict, ratio):
     """
-    Calculates low vs high frequency energy using centered spectrum.
+    Measures what fraction of total spectral energy is in the
+    top-`ratio` coefficients (by magnitude) vs the rest.
+    Uses the exact same masking logic as spectral_gate_delta.
     """
-    low_e_sum = 0
-    high_e_sum = 0
+    low_e_sum = 0.0
+    high_e_sum = 0.0
     count = 0
 
     for name, param in delta_dict.items():
-        if "weight" in name and "bn" not in name:
+        if "weight" not in name or "bn" in name:
+            continue
 
-            w_fft = torch.fft.fftn(param)
-            w_fft_shifted = torch.fft.fftshift(w_fft)
+        p = param.float()
+        w_fft = torch.fft.fftn(p)
+        mag = torch.abs(w_fft)
+        total_energy = torch.sum(mag ** 2)
 
-            mag = torch.abs(w_fft_shifted)
-            total_energy = torch.sum(mag ** 2)
+        if total_energy < 1e-10:
+            continue  # skip dead layers (e.g. at round 0)
 
-            mask = low_freq_mask(
-                mag.shape,
-                low_cut,
-                device=mag.device
-            )
+        k = max(1, int(ratio * mag.numel()))
+        threshold = torch.topk(mag.flatten(), k).values.min()
+        mask = (mag >= threshold).float()
 
-            low_energy = torch.sum((mag ** 2) * mask)
-            high_energy = total_energy - low_energy + 1e-8
+        low_energy = torch.sum((mag ** 2) * mask)
+        high_energy = total_energy - low_energy
 
-            low_e_sum += (low_energy / total_energy).item()
-            high_e_sum += (high_energy / total_energy).item()
-            count += 1
+        low_e_sum  += (low_energy  / total_energy).item()
+        high_e_sum += (high_energy / total_energy).item()
+        count += 1
 
     if count == 0:
-        return 0, 0
+        return 0.0, 0.0
 
     return low_e_sum / count, high_e_sum / count
 
@@ -141,9 +115,6 @@ class LocalUpdate(object):
         )
 
     def update_weights(self, net, client_idx):
-        """
-        Performs local training and returns DELTA instead of full model.
-        """
         global_model = copy.deepcopy(net)
 
         net.train()
@@ -155,12 +126,8 @@ class LocalUpdate(object):
 
         epoch_loss = []
 
-        # =========================
-        # Local Training
-        # =========================
         for _ in range(self.args.local_ep):
             batch_loss = []
-
             for images, labels in self.ldr_train:
                 images = images.to(self.args.device)
                 labels = labels.to(self.args.device)
@@ -168,48 +135,31 @@ class LocalUpdate(object):
                 net.zero_grad()
                 outputs = net(images)
                 loss = self.loss_func(outputs, labels)
-
                 loss.backward()
                 optimizer.step()
 
                 batch_loss.append(loss.item())
-
             epoch_loss.append(sum(batch_loss) / len(batch_loss))
 
-        # =========================
-        # Compute DELTA
-        # =========================
-        local_weights = net.state_dict()
+        # Compute delta
+        local_weights  = net.state_dict()
         global_weights = global_model.state_dict()
-
         delta = {
-            key: local_weights[key] - global_weights[key]
+            key: local_weights[key].float() - global_weights[key].float()
             for key in local_weights.keys()
         }
 
-        # =========================
-        # BEFORE Logging
-        # =========================
+        # BEFORE logging
         if self.args.spectral_gate:
-            low_pre, high_pre = get_spectral_energy_delta(
-                delta, self.args.low_cut
-            )
+            low_pre, high_pre = get_spectral_energy_delta(delta, self.args.ratio)
             print(f"BEFORE [Client {client_idx}] lowE={low_pre:.3f}, highE={high_pre:.3f}")
 
-        # =========================
-        # Apply Spectral Gate
-        # =========================
+        # Apply spectral gate
         if self.args.spectral_gate:
-            delta = spectral_gate_delta(
-                delta,
-                ratio=self.args.ratio,
-                skip_bn=self.args.skip_bn
-            )
+            delta = spectral_gate_delta(delta, ratio=self.args.ratio, skip_bn=self.args.skip_bn)
 
-            # AFTER Logging
-            low_post, high_post = get_spectral_energy_delta(
-                delta, self.args.low_cut
-            )
+            # AFTER logging
+            low_post, high_post = get_spectral_energy_delta(delta, self.args.ratio)
             print(f"AFTER  [Client {client_idx}] lowE={low_post:.3f}, highE={high_post:.3f}")
 
         return delta, sum(epoch_loss) / len(epoch_loss)
@@ -221,9 +171,7 @@ class LocalUpdate(object):
 def globaltest(net, test_dataset, args):
     net.eval()
     test_loader = torch.utils.data.DataLoader(
-        dataset=test_dataset,
-        batch_size=100,
-        shuffle=False
+        dataset=test_dataset, batch_size=100, shuffle=False
     )
 
     correct = 0
@@ -231,13 +179,11 @@ def globaltest(net, test_dataset, args):
 
     with torch.no_grad():
         for images, labels in test_loader:
-            images = images.to(args.device)
-            labels = labels.to(args.device)
-
+            images  = images.to(args.device)
+            labels  = labels.to(args.device)
             outputs = net(images)
             _, predicted = torch.max(outputs.data, 1)
-
-            total += labels.size(0)
+            total   += labels.size(0)
             correct += (predicted == labels).sum().item()
 
     return correct / total

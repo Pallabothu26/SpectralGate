@@ -1,10 +1,8 @@
-print("Using this file")
 import argparse
-from email import parser
 
 def args_parser():
     parser = argparse.ArgumentParser()
-    
+
     # ================= Federated Learning =================
     parser.add_argument('--rounds', type=int, default=10,
                         help="Total global training rounds")
@@ -32,46 +30,36 @@ def args_parser():
 
     # ================= FedSpectralGate =================
     parser.add_argument('--spectral_gate', action='store_true',
-                    help="Enable FedSpectralGate (default: OFF)")
+                        help="Enable FedSpectralGate (default: OFF)")
 
     parser.add_argument('--ratio', type=float, default=0.8,
-                    help="Fraction of LOW-FREQUENCY region to keep (0.8 = keep 80% central spectrum)")
-
-    parser.add_argument('--low_cut', type=float, default=0.2,
-                    help="Threshold to measure low-frequency energy")
+                        help="Top-k fraction of FFT coefficients to keep per layer (0.2 = keep top 20%% by magnitude)")
 
     parser.add_argument('--skip_bn', action='store_true',
-                    help="Skip BatchNorm and bias layers during spectral filtering")
+                        help="Skip BatchNorm and bias layers during spectral filtering")
 
     # ================= Model & Dataset =================
     parser.add_argument('--model', type=str, default='resnet18',
-                        help="Model name")
+                        help="Model name: resnet18 or resnet34")
 
     parser.add_argument('--dataset', type=str, default='cifar10',
                         help="Dataset: cifar10 or cifar100")
 
     parser.add_argument('--num_classes', type=int, default=10,
-                        help="Number of classes")
+                        help="Number of output classes")
 
     # ================= Non-IID Settings =================
     parser.add_argument('--iid', action='store_true',
-                        help="Use IID data distribution")
+                        help="Use IID data distribution (default: Non-IID)")
 
     parser.add_argument('--non_iid_prob_class', type=float, default=0.9,
-                        help="Label skew probability")
+                        help="Label skew probability for non-IID sampling")
 
     parser.add_argument('--alpha_dirichlet', type=float, default=0.5,
-                        help="Dirichlet distribution parameter")
-
-    # ================= Legacy (Optional Cleanup Later) =================
-    parser.add_argument('--iteration1', type=int, default=5)
-    parser.add_argument('--rounds1', type=int, default=200)
-    parser.add_argument('--rounds2', type=int, default=200)
-    parser.add_argument('--frac1', type=float, default=0.01)
-    parser.add_argument('--frac2', type=float, default=0.1)
+                        help="Dirichlet concentration parameter (lower = more heterogeneous)")
 
     # ================= Reproducibility =================
     parser.add_argument('--seed', type=int, default=1,
-                        help="Random seed")
+                        help="Random seed for reproducibility")
 
     return parser.parse_args()
