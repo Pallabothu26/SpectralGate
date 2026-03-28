@@ -30,19 +30,24 @@ def FedAvg_noniid(global_weights, deltas, dict_len):
 
     # Iterate through each layer
     for k in w_global.keys():
+        
+        if not w_global[k].is_floating_point():
+            continue
 
         # Start with zero tensor of same shape
-        avg_delta[k] = torch.zeros_like(w_global[k])
+        avg_delta[k] = torch.zeros_like(w_global[k], dtype=torch.float32)
 
         # Weighted sum of deltas
         for i in range(len(deltas)):
-            avg_delta[k] += deltas[i][k] * dict_len[i]
+            avg_delta[k] += deltas[i][k].float() * dict_len[i]
 
         # Normalize by total samples
         avg_delta[k] = avg_delta[k] / total_samples
 
     #  Apply update: global = global + avg_delta
     for k in w_global.keys():
-        w_global[k] += avg_delta[k]
+        if not w_global[k].is_floating_point():
+            continue
+        w_global[k] += avg_delta[k].to(w_global[k].dtype)
 
     return w_global
