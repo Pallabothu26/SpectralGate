@@ -89,15 +89,21 @@ def get_spectral_energy_delta(delta_dict, ratio):
 # Dataset Split
 # =========================
 class DatasetSplit(Dataset):
-    def __init__(self, dataset, idxs):
+    def __init__(self, dataset, idxs, args):
         self.dataset = dataset
         self.idxs = list(idxs)
+        self.args = args
 
     def __len__(self):
         return len(self.idxs)
 
     def __getitem__(self, item):
         image, label = self.dataset[self.idxs[item]]
+        # Add Gaussian noise if enabled
+        if self.args.add_noise:
+            noise = torch.randn_like(image) * self.args.noise_std
+            image = image + noise
+            image = torch.clamp(image, -3.0, 3.0)  # Ensure pixel values remain valid
         return image, label
 
 
@@ -109,7 +115,7 @@ class LocalUpdate(object):
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
         self.ldr_train = DataLoader(
-            DatasetSplit(dataset, idxs),
+            DatasetSplit(dataset, idxs, args),
             batch_size=self.args.local_bs,
             shuffle=True
         )

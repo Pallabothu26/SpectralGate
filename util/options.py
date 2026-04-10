@@ -1,4 +1,5 @@
 import argparse
+from html import parser
 
 def args_parser():
     parser = argparse.ArgumentParser()
@@ -57,6 +58,14 @@ def args_parser():
 
     parser.add_argument('--alpha_dirichlet', type=float, default=0.5,
                         help="Dirichlet concentration parameter (lower = more heterogeneous)")
+    
+    # ================= Noise Addition for Robustness Testing =================
+    parser.add_argument('--add_noise', action='store_true',
+                    help="Add Gaussian noise to client training data for robustness testing")
+
+    parser.add_argument('--noise_std', type=float, default=0.05,
+                    help="Standard deviation of Gaussian noise added to images (only if --add_noise is enabled)")
+
 
     # ================= Reproducibility =================
     parser.add_argument('--seed', type=int, default=1,
